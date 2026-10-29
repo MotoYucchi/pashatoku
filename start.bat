@@ -1,3 +1,3 @@
 @echo off
 cd app
-docker compose up -d
+docker compose up -d --build
