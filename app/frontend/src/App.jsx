@@ -1,254 +1,374 @@
-import { useState, useEffect } from 'react'
-import axios from 'axios'
-import { Html5QrcodeScanner } from 'html5-qrcode'
-import Cookies from 'js-cookie'
-import TermsModal from './TermsModal'
+import { useState, useEffect, useCallback } from 'react';
+import axios from 'axios';
+import { Html5QrcodeScanner } from 'html5-qrcode';
+import Cookies from 'js-cookie';
+import TermsModal from './TermsModal';
+import PixelIcon from './PixelIcon';
 
 // GPS距離計算 (Haversine formula)
 function getDistanceFromLatLonInM(lat1, lon1, lat2, lon2) {
-  const R = 6371000; // 地球の半径 (m)
+  const R = 6371000;
   const dLat = (lat2 - lat1) * (Math.PI / 180);
   const dLon = (lon2 - lon1) * (Math.PI / 180);
-  const a = 
-    Math.sin(dLat/2) * Math.sin(dLat/2) +
-    Math.cos(lat1 * (Math.PI / 180)) * Math.cos(lat2 * (Math.PI / 180)) * 
-    Math.sin(dLon/2) * Math.sin(dLon/2);
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a)); 
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(lat1 * (Math.PI / 180)) *
+      Math.cos(lat2 * (Math.PI / 180)) *
+      Math.sin(dLon / 2) *
+      Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   return R * c;
 }
 
+function formatSeconds(sec) {
+  if (sec === null || sec === undefined || sec < 0) return '00:00:00';
+  const d = Math.floor(sec / 86400);
+  const h = Math.floor((sec % 86400) / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = sec % 60;
+  const hms = `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+  return d > 0 ? `${d}日 ${hms}` : hms;
+}
+
+function extractCodeFromInput(raw) {
+  if (!raw) return '';
+  let text = raw.trim();
+  try {
+    const url = new URL(text);
+    const params = new URLSearchParams(url.search);
+    if (params.has('code')) {
+      return params.get('code').trim();
+    }
+  } catch (e) {
+    // Plain code string
+  }
+  return text;
+}
+
 function App() {
-  const [tosAgreed, setTosAgreed] = useState(false)
-  const [hostTosAgreed, setHostTosAgreed] = useState(false)
-  const [activeModal, setActiveModal] = useState(null)
-  
-  const [name, setName] = useState('')
-  const [studentId, setStudentId] = useState('')
-  const [userId, setUserId] = useState(null)
-  
-  const [isRegistered, setIsRegistered] = useState(false)
-    const [viewMode, setViewMode] = useState('quiz'); // 'quiz' or 'history'
+  const [tosAgreed, setTosAgreed] = useState(false);
+  const [hostTosAgreed, setHostTosAgreed] = useState(false);
+  const [activeModal, setActiveModal] = useState(null);
+
+  const [name, setName] = useState('');
+  const [studentId, setStudentId] = useState('');
+  const [userId, setUserId] = useState(null);
+
+  const [isRegistered, setIsRegistered] = useState(false);
+  const [viewMode, setViewMode] = useState('quiz'); // 'quiz' or 'history'
   const [answeredQuestionIds, setAnsweredQuestionIds] = useState([]);
   const [historyData, setHistoryData] = useState([]);
-  const [error, setError] = useState('')
-  const [quizCode, setQuizCode] = useState(null)
-  
-  const [quizData, setQuizData] = useState(null)
-  const [isLoadingQuiz, setIsLoadingQuiz] = useState(false)
-  const [currentQIndex, setCurrentQIndex] = useState(0)
-  const [score, setScore] = useState(0)
-  const [isFinished, setIsFinished] = useState(false)
-  
+  const [isLoadingHistory, setIsLoadingHistory] = useState(false);
+
+  const [error, setError] = useState('');
+  const [quizCode, setQuizCode] = useState(null);
+  const [manualCodeInput, setManualCodeInput] = useState('');
+
+  const [quizData, setQuizData] = useState(null);
+  const [isLoadingQuiz, setIsLoadingQuiz] = useState(false);
+  const [currentQIndex, setCurrentQIndex] = useState(0);
+  const [score, setScore] = useState(0);
+  const [isFinished, setIsFinished] = useState(false);
+
   // 回答状態管理
-  const [selectedOption, setSelectedOption] = useState(null)
-  const [showAnswer, setShowAnswer] = useState(false)
-  const [isCorrect, setIsCorrect] = useState(false)
-  const [explanation, setExplanation] = useState('')
-  const [awardedPoints, setAwardedPoints] = useState(0)
-  
-  // ロックとヒントとGPS
-  const [isLocked, setIsLocked] = useState(false)
-  const [lockMessage, setLockMessage] = useState('')
-  const [hintUsed, setHintUsed] = useState(false)
-  const [gpsError, setGpsError] = useState('')
-  const [gpsVerified, setGpsVerified] = useState(false)
+  const [selectedOption, setSelectedOption] = useState(null);
+  const [showAnswer, setShowAnswer] = useState(false);
+  const [isCorrect, setIsCorrect] = useState(false);
+  const [explanation, setExplanation] = useState('');
+  const [awardedPoints, setAwardedPoints] = useState(0);
+  const [effectiveDisplay, setEffectiveDisplay] = useState('immediate'); // 'immediate' or 'after_end'
+  const [correctIndex, setCorrectIndex] = useState(-1);
+
+  // ロック・ヒント・GPS
+  const [isLocked, setIsLocked] = useState(false);
+  const [lockMessage, setLockMessage] = useState('');
+  const [hintUsed, setHintUsed] = useState(false);
+  const [gpsError, setGpsError] = useState('');
+  const [gpsVerified, setGpsVerified] = useState(false);
+
+  // タイマー状態（サーバー時刻とのズレ補正付き）
+  const [serverOffsetMs, setServerOffsetMs] = useState(0);
   const [timeLeft, setTimeLeft] = useState(null);
   const [globalTimerEndAt, setGlobalTimerEndAt] = useState(null);
   const [isGlobalEnded, setIsGlobalEnded] = useState(false);
   const [globalTimeLeft, setGlobalTimeLeft] = useState(null);
 
-  useEffect(() => {
-    const fetchGlobal = async () => {
-      try {
-        const res = await axios.get(`http://${window.location.hostname}:8080/api/global_timer`);
-        setGlobalTimerEndAt(res.data.end_at);
-      } catch (e) { }
-    };
-    fetchGlobal();
-    const int = setInterval(fetchGlobal, 30000); // Fetch every 30s
-    return () => clearInterval(int);
-  }, []);
-
-  useEffect(() => {
-    if (globalTimerEndAt) {
-      const end = new Date(globalTimerEndAt).getTime();
-      const interval = setInterval(() => {
-        const now = Date.now();
-        const diff = Math.floor((end - now) / 1000);
-        if (diff <= 0) {
-          clearInterval(interval);
-          setGlobalTimeLeft(0);
-          setIsGlobalEnded(true);
-        } else {
-          setGlobalTimeLeft(diff);
-          setIsGlobalEnded(false);
-        }
-      }, 1000);
-      return () => clearInterval(interval);
-    } else {
-      setGlobalTimeLeft(null);
-      setIsGlobalEnded(false);
-    }
-  }, [globalTimerEndAt]);
-
-  useEffect(() => {
-    if (quizData && quizData.timer_end_at && quizData.play_status === 'started') {
-      const end = new Date(quizData.timer_end_at).getTime();
-      const interval = setInterval(() => {
-        const now = Date.now();
-        const diff = Math.floor((end - now) / 1000);
-        if (diff <= 0) {
-          clearInterval(interval);
-          setTimeLeft(0);
-          setQuizData(prev => ({...prev, play_status: 'ended'}));
-        } else {
-          setTimeLeft(diff);
-        }
-      }, 1000);
-      return () => clearInterval(interval);
-    } else {
-      setTimeLeft(null);
-    }
-  }, [quizData]);
-
+  // URLパラメータから初期コード取得
   useEffect(() => {
     const urlParams = new URLSearchParams(window.location.search);
     const codeFromUrl = urlParams.get('code');
-    if (codeFromUrl) setQuizCode(codeFromUrl);
+    if (codeFromUrl) {
+      setQuizCode(codeFromUrl.trim());
+    }
   }, []);
 
+  // Cookieから登録状態を復元
   useEffect(() => {
     const savedName = Cookies.get('pashatoku_name');
     const savedId = Cookies.get('pashatoku_studentid');
     const savedUserId = Cookies.get('pashatoku_user_id');
     const savedTos = Cookies.get('pashatoku_tos_agreed');
-    
-    if (savedName && savedId && savedUserId && savedTos === 'true') {
+
+    if (savedName && savedUserId && savedTos === 'true') {
       setName(savedName);
-      setStudentId(savedId);
-      setUserId(parseInt(savedUserId));
+      setStudentId(savedId || 'GUEST');
+      const uid = parseInt(savedUserId, 10);
+      setUserId(uid);
       setTosAgreed(true);
       setHostTosAgreed(true);
       setIsRegistered(true);
-      fetchAnsweredQuestions(parseInt(savedUserId));
+      fetchAnsweredQuestions(uid);
     }
   }, []);
 
   const fetchAnsweredQuestions = async (uid) => {
+    if (!uid) return;
     try {
-      const res = await axios.get(`http://${window.location.hostname}:8080/api/user/${uid}/answered`);
+      const res = await axios.get(`/api/user/${uid}/answered`);
       setAnsweredQuestionIds(res.data || []);
     } catch (e) {}
   };
 
-  const fetchHistory = async () => {
-    if (!userId) return;
+  const fetchHistory = useCallback(async (uid = userId) => {
+    if (!uid) return;
+    setIsLoadingHistory(true);
     try {
-      const res = await axios.get(`http://${window.location.hostname}:8080/api/user/${userId}/history`);
+      const res = await axios.get(`/api/user/${uid}/history`);
       setHistoryData(res.data || []);
-    } catch (e) {}
-  };
+    } catch (e) {
+    } finally {
+      setIsLoadingHistory(false);
+    }
+  }, [userId]);
 
+  const startQuizByCode = useCallback(async (targetCode) => {
+    const cleanCode = extractCodeFromInput(targetCode || quizCode);
+    if (!cleanCode) return;
+    setIsLoadingQuiz(true);
+    setError('');
+    try {
+      const res = await axios.get(`/api/quizzes?code=${encodeURIComponent(cleanCode)}`);
+      setQuizCode(cleanCode);
+      setQuizData(res.data);
+      setCurrentQIndex(0);
+      setScore(0);
+      setIsFinished(false);
+      setSelectedOption(null);
+      setShowAnswer(false);
+      setHintUsed(false);
+      setExplanation('');
+      setIsLocked(false);
+      setLockMessage('');
+      setGpsVerified(false);
+      setViewMode('quiz');
+    } catch (err) {
+      if (err.response && err.response.status === 403) {
+        setError('このクイズイベントは現在閉鎖されています。');
+      } else {
+        setError(`コード「${cleanCode}」のクイズが見つかりませんでした。もう一度確認してください。`);
+      }
+      setQuizCode(null);
+      setQuizData(null);
+    } finally {
+      setIsLoadingQuiz(false);
+    }
+  }, [quizCode]);
 
+  // 統合ポーリング（/api/sync）: 全体タイマー・外部QRスキャン・クイズ進行状態を1回の通信で高速同期
   useEffect(() => {
-    if (isRegistered && !quizCode && !quizData) {
-      const scanner = new Html5QrcodeScanner("reader", { fps: 10, qrbox: 250 });
-      scanner.render((decodedText) => {
-        let code = decodedText;
-        try {
-          const url = new URL(decodedText);
-          const params = new URLSearchParams(url.search);
-          if (params.has('code')) code = params.get('code');
-        } catch (e) {}
-        
-        if (code) {
-          setQuizCode(code);
-          scanner.clear();
+    let isMounted = true;
+    const syncState = async () => {
+      if (document.hidden) return;
+      try {
+        const params = new URLSearchParams();
+        if (isRegistered && userId && !quizCode && !quizData && viewMode === 'quiz') {
+          params.set('user_id', String(userId));
         }
-      }, (err) => {});
-      return () => scanner.clear();
-    }
-  }, [isRegistered, quizCode, quizData]);
+        if (quizCode) {
+          params.set('code', quizCode);
+        }
 
-  // External Scan Polling
-  useEffect(() => {
-    let interval;
-    if (isRegistered && !quizCode && !quizData) {
-      interval = setInterval(async () => {
-        try {
-          const res = await axios.get(`http://${window.location.hostname}:8080/api/user/${userId}/external_scan`);
-          if (res.data && res.data.code) {
-            let code = res.data.code;
-            try {
-              const url = new URL(code);
-              const params = new URLSearchParams(url.search);
-              if (params.has('code')) code = params.get('code');
-            } catch(e) {}
-            setQuizCode(code);
+        const res = await axios.get(`/api/sync?${params.toString()}`);
+        if (!isMounted) return;
+        const data = res.data;
+
+        if (data.server_time) {
+          const srvMs = new Date(data.server_time).getTime();
+          if (!Number.isNaN(srvMs)) {
+            setServerOffsetMs(srvMs - Date.now());
           }
-        } catch (e) {}
-      }, 3000);
-    }
-    return () => {
-      if (interval) clearInterval(interval);
-    }
-  }, [isRegistered, quizCode, quizData, userId]);
+        }
 
-  // ポーリング処理 (ステータス同期)
-  useEffect(() => {
-    let interval;
-    if (quizCode && quizData && !isFinished) {
-      interval = setInterval(async () => {
-        try {
-          const res = await axios.get(`http://${window.location.hostname}:8080/api/quizzes/status?code=${quizCode}`);
-          const { play_status, visibility } = res.data;
-          
-          if (visibility === 'closed') {
-            setError('このクイズイベントは閉鎖されました。');
+        setGlobalTimerEndAt(data.global_timer_end_at || null);
+
+        // 外部カメラ/Pythonからのスキャン受信
+        if (data.external_code && !quizCode && !quizData) {
+          const extCode = extractCodeFromInput(data.external_code);
+          if (extCode) {
+            setQuizCode(extCode);
+            startQuizByCode(extCode);
+          }
+        }
+
+        // 現在開いているクイズのステータス同期
+        if (data.quiz_status && quizData) {
+          const st = data.quiz_status;
+          if (st.visibility === 'closed') {
+            setError('このクイズイベントは主催者により閉鎖されました。');
             setQuizData(null);
             setQuizCode(null);
             return;
           }
 
-          if (quizData.play_status !== play_status) {
-            if (play_status === 'started' && quizData.play_status === 'waiting') {
-              // 管理者が「開始」にした場合、問題を再取得する
-              startQuiz();
+          if (quizData.play_status !== st.play_status || quizData.result_display !== st.result_display) {
+            if (st.play_status === 'started' && quizData.play_status === 'waiting') {
+              startQuizByCode(quizCode);
             } else {
-              setQuizData(prev => ({...prev, play_status}));
+              setQuizData((prev) =>
+                prev
+                  ? {
+                      ...prev,
+                      play_status: st.play_status,
+                      result_display: st.result_display || prev.result_display,
+                      timer_end_at: st.timer_end_at || prev.timer_end_at,
+                    }
+                  : prev
+              );
             }
           }
-        } catch (err) {
-          // ネットワークエラー等は無視して次回に再試行
         }
-      }, 3000);
-    }
-    return () => {
-      if (interval) clearInterval(interval);
+      } catch (e) {
+        // Ignore transient network errors
+      }
     };
-  }, [quizCode, quizData, isFinished]);
+
+    syncState();
+    const interval = setInterval(syncState, 2000);
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
+    };
+  }, [isRegistered, userId, quizCode, quizData, viewMode, startQuizByCode]);
+
+  // 全体タイマーのカウントダウン計算
+  useEffect(() => {
+    if (!globalTimerEndAt) {
+      setGlobalTimeLeft(null);
+      setIsGlobalEnded(false);
+      return;
+    }
+    const end = new Date(globalTimerEndAt).getTime();
+    const tick = () => {
+      const now = Date.now() + serverOffsetMs;
+      const diff = Math.floor((end - now) / 1000);
+      if (diff <= 0) {
+        setGlobalTimeLeft(0);
+        setIsGlobalEnded(true);
+      } else {
+        setGlobalTimeLeft(diff);
+        setIsGlobalEnded(false);
+      }
+    };
+    tick();
+    const interval = setInterval(tick, 1000);
+    return () => clearInterval(interval);
+  }, [globalTimerEndAt, serverOffsetMs]);
+
+  // クイズ個別タイマーのカウントダウン計算
+  useEffect(() => {
+    if (quizData && quizData.timer_end_at && quizData.play_status === 'started') {
+      const end = new Date(quizData.timer_end_at).getTime();
+      const tick = () => {
+        const now = Date.now() + serverOffsetMs;
+        const diff = Math.floor((end - now) / 1000);
+        if (diff <= 0) {
+          setTimeLeft(0);
+          setQuizData((prev) => (prev ? { ...prev, play_status: 'ended' } : prev));
+        } else {
+          setTimeLeft(diff);
+        }
+      };
+      tick();
+      const interval = setInterval(tick, 1000);
+      return () => clearInterval(interval);
+    } else {
+      setTimeLeft(null);
+    }
+  }, [quizData, serverOffsetMs]);
+
+  // 履歴画面を開いているとき、開催中のクイズが終了したら自動で結果が解放されるよう定期更新
+  useEffect(() => {
+    if (viewMode === 'history' && isRegistered && userId) {
+      fetchHistory(userId);
+      const int = setInterval(() => {
+        if (!document.hidden) fetchHistory(userId);
+      }, 4000);
+      return () => clearInterval(int);
+    }
+  }, [viewMode, isRegistered, userId, fetchHistory]);
+
+  // QRコードスキャナーの起動とクリーンアップ
+  useEffect(() => {
+    if (isRegistered && viewMode === 'quiz' && !quizCode && !quizData && !isGlobalEnded) {
+      let scanner = null;
+      const timer = setTimeout(() => {
+        const el = document.getElementById('reader');
+        if (!el) return;
+        scanner = new Html5QrcodeScanner('reader', { fps: 10, qrbox: 220 }, false);
+        scanner.render(
+          (decodedText) => {
+            const code = extractCodeFromInput(decodedText);
+            if (code) {
+              scanner.clear().catch(() => {});
+              setQuizCode(code);
+              startQuizByCode(code);
+            }
+          },
+          () => {}
+        );
+      }, 150);
+
+      return () => {
+        clearTimeout(timer);
+        if (scanner) {
+          scanner.clear().catch(() => {});
+        }
+      };
+    }
+  }, [isRegistered, viewMode, quizCode, quizData, isGlobalEnded, startQuizByCode]);
 
   const handleRegister = async (e) => {
     e.preventDefault();
     setError('');
-    if (!tosAgreed || !hostTosAgreed) {
-      setError('すべての規約に同意する必要があります。');
+    if (!name.trim()) {
+      setError('お名前（ニックネーム）を入力してください。');
       return;
     }
+    if (!tosAgreed || !hostTosAgreed) {
+      setError('2つの利用規約にチェックを入れて同意してください。');
+      return;
+    }
+    const cleanId = studentId.trim() || 'GUEST';
     try {
-      const res = await axios.post(`http://${window.location.hostname}:8080/api/user/register`, {
-        name, student_id: studentId
+      const res = await axios.post(`/api/user/register`, {
+        name: name.trim(),
+        student_id: cleanId,
       });
-      Cookies.set('pashatoku_name', name, { expires: 30 });
-      Cookies.set('pashatoku_studentid', studentId, { expires: 30 });
+      Cookies.set('pashatoku_name', name.trim(), { expires: 30 });
+      Cookies.set('pashatoku_studentid', cleanId, { expires: 30 });
       Cookies.set('pashatoku_user_id', res.data.id.toString(), { expires: 30 });
       Cookies.set('pashatoku_tos_agreed', 'true', { expires: 30 });
-      
+
       setUserId(res.data.id);
+      setStudentId(cleanId);
       setIsRegistered(true);
       fetchAnsweredQuestions(res.data.id);
+
+      if (quizCode) {
+        startQuizByCode(quizCode);
+      }
     } catch (err) {
-      setError(err.response?.data || '登録に失敗しました。');
+      setError(err.response?.data || '登録できませんでした。お名前に記号が入っていないか確認してください。');
     }
   };
 
@@ -260,12 +380,14 @@ function App() {
     setIsRegistered(false);
     setQuizCode(null);
     setQuizData(null);
+    setAnsweredQuestionIds([]);
+    setHistoryData([]);
   };
 
   const verifyGps = (targetLat, targetLng, radius) => {
     return new Promise((resolve, reject) => {
       if (!navigator.geolocation) {
-        reject('このブラウザはGPSをサポートしていません。');
+        reject('お使いの端末は位置情報（GPS）に対応していません。');
         return;
       }
       navigator.geolocation.getCurrentPosition(
@@ -274,46 +396,26 @@ function App() {
           if (dist <= radius) {
             resolve(true);
           } else {
-            reject(`指定エリアから離れすぎています (距離: 約${Math.round(dist)}m)`);
+            reject(`指定された場所から離れています（あと約 ${Math.round(dist)} m 近づいてください）`);
           }
         },
-        (err) => reject('位置情報の取得に失敗しました。GPS設定をオンにしてください。'),
+        () => reject('位置情報が取得できませんでした。端末のGPS設定をオンにしてください。'),
         { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
       );
     });
-  };
-
-  const startQuiz = async () => {
-    setIsLoadingQuiz(true);
-    setError('');
-    try {
-      const res = await axios.get(`http://${window.location.hostname}:8080/api/quizzes?code=${quizCode}`);
-      setQuizData(res.data);
-      setCurrentQIndex(0);
-      setGpsVerified(false);
-    } catch (err) {
-      if (err.response && err.response.status === 403) {
-          setError('このイベントは現在閉鎖されているか、アクセスできません。');
-      } else {
-          setError('クイズが見つかりません。');
-      }
-      setQuizCode(null);
-    } finally {
-      setIsLoadingQuiz(false);
-    }
   };
 
   useEffect(() => {
     if (!quizData || quizData.play_status !== 'started' || !quizData.questions || quizData.questions.length === 0) return;
     const q = quizData.questions[currentQIndex];
     if (quizData.mode === 'gps' && q.lat && q.lng && !gpsVerified) {
-      setGpsError('現在地を検証しています...');
+      setGpsError('現在地をチェックしています...');
       verifyGps(q.lat, q.lng, q.radius || 50)
         .then(() => {
           setGpsVerified(true);
           setGpsError('');
         })
-        .catch(err => {
+        .catch((err) => {
           setGpsError(err);
         });
     } else {
@@ -323,36 +425,41 @@ function App() {
 
   const handleOptionSelect = async (index) => {
     if (showAnswer || isLocked) return;
-    
+    setError('');
     try {
+      const currentQ = quizData.questions[currentQIndex];
       const payload = {
         user_id: userId,
-        question_id: quizData.questions[currentQIndex].id,
+        question_id: currentQ.id,
         selected_index: index,
-        answer_text: "",
-        used_hint: hintUsed
+        answer_text: '',
+        used_hint: hintUsed,
       };
-      
-      const res = await axios.post(`http://${window.location.hostname}:8080/api/quizzes/answer`, payload);
-      
+
+      const res = await axios.post(`/api/quizzes/answer`, payload);
+
       if (res.data.is_locked) {
         setIsLocked(true);
         setLockMessage(res.data.message);
         return;
       }
 
+      const dispMode = res.data.effective_display || 'immediate';
       setSelectedOption(index);
+      setEffectiveDisplay(dispMode);
       setIsCorrect(res.data.is_correct);
       setAwardedPoints(res.data.points_awarded);
-      setExplanation(res.data.explanation);
-      setScore(prev => prev + res.data.points_awarded);
+      setExplanation(res.data.explanation || '');
+      setCorrectIndex(res.data.correct_index !== undefined ? res.data.correct_index : -1);
+      setScore((prev) => prev + res.data.points_awarded);
       setShowAnswer(true);
-      setAnsweredQuestionIds(prev => [...prev, quizData.questions[currentQIndex].id]);
+      setAnsweredQuestionIds((prev) => [...prev, currentQ.id]);
     } catch (err) {
       if (err.response && err.response.status === 409) {
-          setError('この問題は既に回答済みです。');
+        setError('この問題はすでに回答済みです。');
+        setAnsweredQuestionIds((prev) => [...prev, quizData.questions[currentQIndex].id]);
       } else {
-          setError('通信エラーが発生しました。');
+        setError('通信エラーが発生しました。もう一度ボタンを押してください。');
       }
     }
   };
@@ -367,320 +474,1035 @@ function App() {
       setIsLocked(false);
       setLockMessage('');
       setGpsVerified(false);
+      window.scrollTo({ top: 0, behavior: 'smooth' });
     } else {
       setIsFinished(true);
+      fetchHistory(userId);
+      window.scrollTo({ top: 0, behavior: 'smooth' });
     }
   };
 
+  const resetToScanner = () => {
+    setQuizData(null);
+    setQuizCode(null);
+    setManualCodeInput('');
+    setIsFinished(false);
+    setSelectedOption(null);
+    setShowAnswer(false);
+    setError('');
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  const optionStyles = [
+    { label: 'A', badgeBg: 'bg-red-600 text-white', hoverBg: 'hover:bg-red-50' },
+    { label: 'B', badgeBg: 'bg-blue-700 text-white', hoverBg: 'hover:bg-blue-50' },
+    { label: 'C', badgeBg: 'bg-amber-500 text-gray-900', hoverBg: 'hover:bg-amber-50' },
+    { label: 'D', badgeBg: 'bg-emerald-700 text-white', hoverBg: 'hover:bg-emerald-50' },
+  ];
+
   return (
-    <div className="min-h-screen bg-slate-900 text-white flex flex-col items-center p-6 font-sans relative">
+    <div className="min-h-[100dvh] w-full bg-[#FFFDF7] text-gray-900 flex flex-col">
       <TermsModal isOpen={activeModal !== null} onClose={() => setActiveModal(null)} type={activeModal} />
-      {globalTimeLeft !== null && !isGlobalEnded && (
-        <div className="fixed top-0 left-0 w-full bg-red-900/90 backdrop-blur-md text-red-100 text-center py-2 font-black z-50 shadow-[0_4px_20px_rgba(220,38,38,0.4)] flex justify-center items-center gap-3 border-b border-red-500/50">
-          <span>🌍 サービス全体終了まで</span>
-          <span className="text-xl tracking-widest font-mono">
-            {Math.floor(globalTimeLeft / 86400) > 0 ? `${Math.floor(globalTimeLeft / 86400)}日 ` : ''}
-            {Math.floor((globalTimeLeft % 86400) / 3600).toString().padStart(2, '0')}:{(Math.floor((globalTimeLeft % 3600) / 60)).toString().padStart(2, '0')}:{(globalTimeLeft % 60).toString().padStart(2, '0')}
-          </span>
-        </div>
-      )}
-      {quizData && quizData.timer_end_at && quizData.play_status === 'started' && timeLeft !== null && (
-        <div className={`fixed left-0 w-full bg-red-600/90 backdrop-blur-md text-white text-center py-2 font-black shadow-lg flex justify-center items-center gap-3 ${globalTimeLeft !== null && !isGlobalEnded ? 'top-10 z-40' : 'top-0 z-50'}`}>
-          <span>⏳ イベント終了まで</span>
-          <span className="text-xl tracking-widest">{Math.floor(timeLeft / 3600).toString().padStart(2, '0')}:{(Math.floor((timeLeft % 3600) / 60)).toString().padStart(2, '0')}:{(timeLeft % 60).toString().padStart(2, '0')}</span>
-        </div>
-      )}
 
-      <header className={`mb-10 text-center relative w-full max-w-md ${(timeLeft !== null && globalTimeLeft !== null && !isGlobalEnded) ? 'mt-24' : (timeLeft !== null || (globalTimeLeft !== null && !isGlobalEnded) ? 'mt-14' : 'mt-4')}`}>
-        <h1 className="text-4xl font-black tracking-tighter text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-emerald-400">
-          PASHATOKU.COM
-        </h1>
-        <p className="text-slate-400 text-sm mt-2">Interactive Quiz System</p>
-        
-        {isRegistered && (
-          <div className="mt-6 flex justify-center space-x-4">
-            <button onClick={() => setViewMode('quiz')} className={`px-6 py-2 rounded-xl font-black text-sm transition-all ${viewMode === 'quiz' ? 'bg-blue-600 text-white shadow-lg' : 'bg-slate-800 text-slate-400 hover:bg-slate-700'}`}>クイズ</button>
-            <button onClick={() => { setViewMode('history'); fetchHistory(); }} className={`px-6 py-2 rounded-xl font-black text-sm transition-all ${viewMode === 'history' ? 'bg-emerald-600 text-white shadow-lg' : 'bg-slate-800 text-slate-400 hover:bg-slate-700'}`}>履歴・結果</button>
-          </div>
-        )}
-      </header>
-
-      {isGlobalEnded ? (
-         <div className="w-full max-w-md text-center animate-in zoom-in duration-500 mt-10">
-           <div className="bg-red-900/40 p-10 rounded-3xl shadow-2xl border border-red-500/50">
-             <div className="text-6xl mb-6 inline-block">🛑</div>
-             <h2 className="text-3xl font-black mb-4 text-red-400">サービス終了</h2>
-             <p className="text-red-200 font-bold mb-6">全イベントの制限時間が終了しました。</p>
-             <button onClick={() => { setViewMode('history'); setIsGlobalEnded(false); fetchHistory(); }} className="w-full bg-red-700 text-white px-8 py-4 rounded-xl font-black hover:bg-red-600 transition-all shadow-lg border border-red-500">履歴・結果を見る</button>
-           </div>
-         </div>
-      ) : viewMode === 'history' && isRegistered ? (
-         <div className="w-full max-w-2xl animate-in slide-in-from-bottom-4 duration-500">
-           <h2 className="text-2xl font-black mb-6 text-emerald-400 text-center">参加履歴・結果</h2>
-           {historyData.length === 0 ? (
-             <p className="text-slate-400 text-center py-8">まだ参加したイベントがありません。</p>
-           ) : historyData.map(h => (
-             <div key={h.quiz_id} className="bg-slate-800 p-6 rounded-2xl mb-4 border border-slate-700 shadow-xl">
-                <div className="flex justify-between items-center mb-2">
-                   <h3 className="font-bold text-lg text-blue-300">{h.title}</h3>
-                   {h.play_status === 'ended' ? <span className="bg-slate-700 text-slate-300 text-xs px-2 py-1 rounded">終了済</span> : <span className="bg-emerald-900 text-emerald-300 text-xs px-2 py-1 rounded">開催中</span>}
-                </div>
-                <p className="text-sm text-slate-400 mb-4">合計スコア: <span className="text-xl font-black text-white">{h.total_score || 0}</span> pt</p>
-                {h.play_status === 'ended' && (
-                  <p className="text-xs text-slate-500">※イベントが終了したため、詳細な結果はこのイベントに参加した人のみ閲覧可能です。(今後のアップデートで詳細表示機能が追加される予定です)</p>
-                )}
-             </div>
-           ))}
-         </div>
-      ) : !isRegistered ? (
-        // --- 登録フォーム ---
-        <form onSubmit={handleRegister} className="w-full max-w-md bg-slate-800 p-8 rounded-3xl shadow-2xl border border-slate-700">
-          <h2 className="text-xl font-bold mb-6 text-center">参加者エントリー</h2>
-          <div className="space-y-4">
-            <div>
-              <label className="block text-xs font-bold text-slate-400 uppercase mb-1">ユーザー名</label>
-              <input type="text" value={name} onChange={(e) => setName(e.target.value)} className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 focus:ring-2 focus:ring-blue-500 outline-none transition-all"/>
-            </div>
-            <div>
-              <label className="block text-xs font-bold text-slate-400 uppercase mb-1">学籍番号</label>
-              <input type="text" value={studentId} onChange={(e) => setStudentId(e.target.value)} className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 focus:ring-2 focus:ring-blue-500 outline-none transition-all"/>
-            </div>
-            
-            <div className="mt-6 bg-slate-900 p-4 rounded-xl border border-slate-700 text-sm">
-              <p className="text-slate-400 mb-4 text-xs">以下の規約に同意していただく必要があります。</p>
-              <div className="flex items-start space-x-3 mb-3">
-                <input type="checkbox" checked={tosAgreed} onChange={(e) => setTosAgreed(e.target.checked)} className="mt-1 w-5 h-5 text-blue-600 bg-slate-800 border-slate-600 rounded"/>
-                <span className="text-slate-300">
-                  <button type="button" onClick={() => setActiveModal('pashatoku')} className="text-blue-400 underline font-bold">パシャトク利用規約</button> に同意する
-                </span>
-              </div>
-              <div className="flex items-start space-x-3">
-                <input type="checkbox" checked={hostTosAgreed} onChange={(e) => setHostTosAgreed(e.target.checked)} className="mt-1 w-5 h-5 text-emerald-600 bg-slate-800 border-slate-600 rounded"/>
-                <span className="text-slate-300">
-                  <button type="button" onClick={() => setActiveModal('host')} className="text-emerald-400 underline font-bold">主催者の提示する利用規約</button> に同意する
-                </span>
-              </div>
-            </div>
-          </div>
-          {error && <p className="text-red-400 text-sm mt-4 text-center font-bold">{error}</p>}
-          <button type="submit" className="w-full mt-8 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 py-4 rounded-xl font-black text-lg shadow-lg active:scale-95 transition-all">
-            同意して参加する
-          </button>
-          <div className="mt-6 text-center">
-             <a href="/admin/create" className="text-slate-500 text-xs hover:text-white underline">管理者: クイズを管理・作成する</a>
-          </div>
-        </form>
-      ) : !quizData ? (
-        // --- QRスキャン / 待機 ---
-        <div className="w-full max-w-md text-center animate-in fade-in zoom-in duration-300">
-          <div className="bg-emerald-500/10 border border-emerald-500/20 p-4 rounded-2xl mb-6 relative">
-            <p className="text-emerald-400 font-bold">✓ エントリー完了: {name} さん</p>
-            <button onClick={handleResetRegistration} className="text-xs text-slate-500 underline hover:text-white mt-2 block mx-auto">
-              登録情報をリセットしてやり直す
-            </button>
-          </div>
-          {error && <p className="text-red-400 text-sm mb-4 font-bold bg-red-900/20 py-2 rounded-xl">{error}</p>}
-
-          {!quizCode ? (
-            <div className="bg-slate-800 p-6 rounded-3xl border border-slate-700 shadow-2xl">
-              <h3 className="text-lg font-bold mb-4 text-slate-300">問題のQRコードをスキャン</h3>
-              <div id="reader" className="overflow-hidden rounded-xl bg-black"></div>
-              <div className="mt-6">
-                <p className="text-slate-400 text-sm mb-2">またはクイズコードを入力</p>
-                <input 
-                  type="text" placeholder="クイズコード"
-                  className="w-full text-center bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 font-bold text-white outline-none"
-                  onKeyDown={(e) => { if (e.key === 'Enter' && e.target.value) setQuizCode(e.target.value); }}
-                  onBlur={(e) => { if (e.target.value) setQuizCode(e.target.value); }}
-                />
-              </div>
-            </div>
-          ) : (
-            <div className="bg-blue-600 p-10 rounded-3xl shadow-2xl animate-in zoom-in">
-              <h2 className="text-3xl font-black mb-2">Quiz Found!</h2>
-              <p className="text-xl font-mono mb-6 bg-black/20 py-2 rounded-xl">Code: {quizCode}</p>
-              <button onClick={startQuiz} disabled={isLoadingQuiz} className="w-full bg-white text-blue-600 px-10 py-4 rounded-xl font-black shadow-lg hover:scale-105 active:scale-95 transition-all">
-                {isLoadingQuiz ? '読込中...' : '開始する'}
-              </button>
-              <button onClick={() => setQuizCode(null)} className="block mx-auto mt-6 text-blue-200 text-sm hover:text-white">キャンセル</button>
-            </div>
-          )}
-        </div>
-      ) : isFinished ? (
-        // --- 結果画面 ---
-        <div className="w-full max-w-md text-center animate-in zoom-in duration-500">
-          <div className="bg-gradient-to-br from-indigo-600 to-purple-600 p-10 rounded-3xl shadow-2xl border border-white/10">
-            <h2 className="text-3xl font-black mb-2 text-white">Quiz Finished!</h2>
-            <p className="text-indigo-200 mb-8 font-bold">{quizData.title}</p>
-            <div className="bg-black/20 rounded-3xl p-8 mb-8 backdrop-blur-md shadow-inner border border-white/5">
-              <p className="text-lg font-bold mb-2 text-indigo-100">Total Score</p>
-              <p className="text-7xl font-black tracking-tighter text-white">
-                {score}<span className="text-2xl text-indigo-300 ml-1">pt</span>
-              </p>
-            </div>
-            <button onClick={() => window.location.reload()} className="w-full bg-white text-indigo-600 px-8 py-4 rounded-xl font-black shadow-[0_0_20px_rgba(255,255,255,0.3)] hover:scale-105 active:scale-95 transition-all">
-              トップへ戻る
-            </button>
-          </div>
-        </div>
-      ) : quizData.play_status === 'waiting' ? (
-        // --- 待機画面 ---
-        <div className="w-full max-w-md text-center animate-in zoom-in duration-500">
-           <div className="bg-slate-800 p-10 rounded-3xl shadow-2xl border border-slate-700">
-             <div className="animate-spin text-5xl mb-6 inline-block">⏳</div>
-             <h2 className="text-2xl font-black mb-4 text-emerald-400">待機中</h2>
-             <p className="text-slate-300 font-bold mb-2">{quizData.title}</p>
-             <p className="text-slate-500 text-sm">管理者が開始するまで、この画面のままお待ちください。</p>
-           </div>
-         </div>
-      ) : quizData.play_status === 'ended' ? (
-        // --- 終了画面 ---
-        <div className="w-full max-w-md text-center animate-in zoom-in duration-500">
-           <div className="bg-slate-800 p-10 rounded-3xl shadow-2xl border border-slate-700">
-             <div className="text-5xl mb-6 inline-block">🏁</div>
-             <h2 className="text-2xl font-black mb-4 text-slate-300">イベント終了</h2>
-             <p className="text-slate-400 font-bold mb-6">このイベントは終了しました。</p>
-             <button onClick={() => window.location.reload()} className="w-full bg-slate-700 text-white px-8 py-4 rounded-xl font-black hover:bg-slate-600 transition-all">トップへ戻る</button>
-           </div>
-         </div>
-      ) : (
-        // --- クイズプレイ画面 ---
-        <div className="w-full max-w-md animate-in slide-in-from-bottom-8 duration-500">
-          <div className="mb-4 flex justify-between items-center text-slate-400 font-bold text-sm">
-            <span className="truncate pr-4 text-blue-400">{quizData.title}</span>
-            <span className="whitespace-nowrap bg-slate-800 px-3 py-1 rounded-lg">Q. {currentQIndex + 1} / {quizData.questions.length}</span>
-          </div>
-
-          {!gpsVerified ? (
-             <div className="bg-slate-800 p-8 rounded-3xl shadow-2xl border border-slate-700 text-center">
-                <div className="animate-pulse text-4xl mb-4">📍</div>
-                <h3 className="text-xl font-bold text-white mb-2">GPSチェック中</h3>
-                <p className="text-slate-400 mb-6">{gpsError}</p>
-                {gpsError && gpsError.includes('失敗') === false && (
-                   <button onClick={() => { setGpsVerified(false); setGpsError('再検証中...'); verifyGps(quizData.questions[currentQIndex].lat, quizData.questions[currentQIndex].lng, quizData.questions[currentQIndex].radius || 50).then(()=>setGpsVerified(true)).catch(e=>setGpsError(e)) }} className="bg-blue-600 px-6 py-2 rounded-xl font-bold text-white">再試行</button>
-                )}
-             </div>
-          ) : quizData.questions[currentQIndex] && answeredQuestionIds.some(id => String(id) === String(quizData.questions[currentQIndex].id)) && !showAnswer ? (
-             <div className="bg-slate-800 p-10 rounded-3xl shadow-2xl border border-slate-700 text-center animate-in zoom-in">
-                <div className="text-5xl mb-6 inline-block">🔒</div>
-                <h2 className="text-2xl font-black mb-4 text-emerald-400">回答済みです</h2>
-                <p className="text-slate-400 font-bold mb-6">この問題はすでに回答しています。</p>
-                <button onClick={() => { setQuizData(null); setQuizCode(null); }} className="w-full bg-slate-700 text-white px-8 py-4 rounded-xl font-black hover:bg-slate-600 transition-all shadow-lg border border-slate-600">スキャン画面に戻る</button>
-             </div>
-          ) : (
-            <>
-              {/* 問題文パネル */}
-              <div className="bg-slate-800 p-6 rounded-3xl shadow-2xl border border-slate-700 mb-6 relative overflow-hidden">
-                {quizData.style === 'fastest' && (
-                   <div className="absolute top-0 left-0 w-full bg-red-600/90 text-white text-[10px] font-black text-center py-1 tracking-widest uppercase shadow-md">
-                      ⚠️ 早押しバトル！最初に正解した人のみ得点！
-                   </div>
-                )}
-
-                <div className={`mt-4 flex justify-between items-start mb-4 ${quizData.style === 'fastest' ? 'mt-6' : ''}`}>
-                   <span className="bg-emerald-500/20 text-emerald-400 text-xs font-bold px-3 py-1 rounded-lg border border-emerald-500/30">
-                     配点: {quizData.questions[currentQIndex].points} pt
-                   </span>
-                   {quizData.questions[currentQIndex].penalty_points > 0 && (
-                     <span className="bg-red-500/20 text-red-400 text-xs font-bold px-3 py-1 rounded-lg border border-red-500/30">
-                       誤答: -{quizData.questions[currentQIndex].penalty_points} pt
-                     </span>
-                   )}
-                </div>
-
-                <h2 className="text-xl font-bold leading-relaxed mb-4">
-                  {quizData.questions[currentQIndex].text}
-                </h2>
-
-                {quizData.questions[currentQIndex].media_url && (
-                  <img src={quizData.questions[currentQIndex].media_url} alt="Question Media" className="w-full h-auto rounded-xl mb-4 border border-slate-700 shadow-md" />
-                )}
-
-                {/* ヒント機能 */}
-                {quizData.questions[currentQIndex].hint && !showAnswer && !isLocked && (
-                  <div className="mt-4">
-                    {!hintUsed ? (
-                      <button onClick={() => setHintUsed(true)} className="w-full bg-slate-700 hover:bg-slate-600 text-slate-300 text-sm font-bold py-2 rounded-xl transition-colors border border-slate-600 border-dashed">
-                        💡 ヒントを見る (得点が半減します)
-                      </button>
-                    ) : (
-                      <div className="bg-yellow-900/30 border border-yellow-600/50 p-4 rounded-xl text-yellow-200 text-sm font-bold animate-in fade-in">
-                        💡 ヒント: {quizData.questions[currentQIndex].hint}
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
-
-              {/* ロック状態 */}
-              {isLocked ? (
-                 <div className="bg-red-900/40 border border-red-500/50 p-8 rounded-3xl text-center shadow-xl animate-in zoom-in">
-                    <div className="text-5xl mb-4">🔒</div>
-                    <h3 className="text-2xl font-black text-red-400 mb-2">LOCKED</h3>
-                    <p className="text-red-200 font-bold">{lockMessage}</p>
-                    <button onClick={nextQuestion} className="mt-8 bg-red-600 text-white px-8 py-3 rounded-xl font-bold hover:bg-red-500">次の問題へ進む</button>
-                 </div>
-              ) : (
-                 // 選択肢
-                <div className="space-y-4">
-                  {quizData.questions[currentQIndex].options.map((opt, i) => {
-                    const isSelected = i === selectedOption;
-                    let btnClass = "w-full text-left p-5 rounded-2xl font-bold border-2 transition-all flex items-center ";
-                    
-                    if (!showAnswer) {
-                      btnClass += "bg-slate-800 border-slate-700 hover:border-blue-500 hover:bg-slate-750 active:scale-95";
-                    } else {
-                      if (isSelected) {
-                        btnClass += isCorrect 
-                          ? "bg-emerald-500/20 border-emerald-500 text-emerald-400 shadow-[0_0_15px_rgba(16,185,129,0.3)]" 
-                          : "bg-red-500/20 border-red-500 text-red-400";
-                      } else {
-                        btnClass += "bg-slate-800 border-slate-800 opacity-50";
-                      }
-                    }
-
-                    return (
-                      <button key={i} disabled={showAnswer} onClick={() => handleOptionSelect(i)} className={btnClass}>
-                        <span className={`inline-block w-8 h-8 flex-shrink-0 text-center leading-8 bg-slate-900 rounded-full mr-4 text-sm font-black border ${isSelected ? (isCorrect ? 'border-emerald-500' : 'border-red-500') : 'border-slate-700'}`}>
-                          {['A', 'B', 'C', 'D'][i]}
-                        </span>
-                        <span>{opt}</span>
-                      </button>
-                    )
-                  })}
+      {/* 固定解除・通常の文書フローに配置した見やすいタイマー＆ヘッダー領域（他の要素と絶対に被らない設計） */}
+      <div className="w-full border-b-[3px] border-gray-900 bg-white sticky top-0 z-30 shadow-sm">
+        {/* 1. 全体時間バー & クイズ個別時間バー（横並びまたは縦積みでスッキリ整理） */}
+        {((globalTimeLeft !== null && !isGlobalEnded) ||
+          (quizData && quizData.timer_end_at && quizData.play_status === 'started' && timeLeft !== null)) && (
+          <div className="w-full bg-gray-900 text-white px-3 py-2 border-b-[3px] border-gray-900">
+            <div className="max-w-2xl mx-auto flex flex-wrap items-center justify-center gap-2 sm:gap-4">
+              {globalTimeLeft !== null && !isGlobalEnded && (
+                <div className="flex items-center gap-2 bg-red-700 px-3 py-1 rounded-lg border-2 border-white">
+                  <PixelIcon name="globe" size={22} />
+                  <span className="text-xs sm:text-sm font-black">全体のこり時間:</span>
+                  <span className="text-base sm:text-lg font-mono font-black tracking-wider bg-black/30 px-2 py-0.5 rounded">
+                    {formatSeconds(globalTimeLeft)}
+                  </span>
                 </div>
               )}
 
-              {/* 回答結果と解説 */}
-              {showAnswer && !isLocked && (
-                <div className="mt-6 bg-slate-800 p-6 rounded-3xl border border-slate-700 shadow-2xl animate-in slide-in-from-bottom-4">
-                  <div className="text-center mb-4">
-                    <p className={`text-2xl font-black ${isCorrect ? 'text-emerald-400' : 'text-red-400'}`}>
-                      {isCorrect ? '🎉 正解！' : '❌ 不正解...'}
-                    </p>
-                    <p className="text-slate-300 font-bold mt-1">
-                      獲得ポイント: <span className={awardedPoints > 0 ? 'text-emerald-400' : 'text-red-400'}>{awardedPoints > 0 ? `+${awardedPoints}` : awardedPoints} pt</span>
-                    </p>
+              {quizData && quizData.timer_end_at && quizData.play_status === 'started' && timeLeft !== null && (
+                <div className="flex items-center gap-2 bg-amber-400 text-gray-900 px-3 py-1 rounded-lg border-2 border-gray-900">
+                  <PixelIcon name="clock" size={22} />
+                  <span className="text-xs sm:text-sm font-black">このクイズのこり:</span>
+                  <span className="text-base sm:text-lg font-mono font-black tracking-wider bg-white px-2 py-0.5 rounded border border-gray-900">
+                    {formatSeconds(timeLeft)}
+                  </span>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* 2. メインヘッダー＆ナビゲーションボタン */}
+        <header className="max-w-2xl mx-auto w-full px-4 py-3 flex flex-col sm:flex-row items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={resetToScanner}
+              className="flex items-center gap-2.5 text-left focus:outline-none"
+            >
+              <div className="p-1.5 bg-amber-200 border-2 border-gray-900 rounded-xl">
+                <PixelIcon name="camera" size={34} />
+              </div>
+              <div>
+                <h1 className="text-2xl sm:text-3xl font-black tracking-tight text-gray-900 leading-none">
+                  パシャトク
+                </h1>
+                <p className="text-xs sm:text-sm font-bold text-gray-700 mt-0.5">
+                  カメラでパシャ！歩いて解くクイズ
+                </p>
+              </div>
+            </button>
+          </div>
+
+          {isRegistered && (
+            <nav className="flex w-full sm:w-auto gap-2">
+              <button
+                type="button"
+                onClick={() => setViewMode('quiz')}
+                className={`flex-1 sm:flex-initial tactile-btn px-4 py-2.5 font-black text-base flex items-center justify-center gap-2 ${
+                  viewMode === 'quiz'
+                    ? 'bg-blue-700 text-white'
+                    : 'bg-white text-gray-900 hover:bg-gray-100'
+                }`}
+              >
+                <PixelIcon name="camera" size={22} />
+                <span>クイズを解く</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setViewMode('history');
+                  fetchHistory(userId);
+                }}
+                className={`flex-1 sm:flex-initial tactile-btn px-4 py-2.5 font-black text-base flex items-center justify-center gap-2 ${
+                  viewMode === 'history'
+                    ? 'bg-emerald-700 text-white'
+                    : 'bg-white text-gray-900 hover:bg-gray-100'
+                }`}
+              >
+                <PixelIcon name="trophy" size={22} />
+                <span>けっか・履歴</span>
+              </button>
+            </nav>
+          )}
+        </header>
+      </div>
+
+      {/* メインコンテンツ領域（スマホの下部ナビゲーションバーでも見切れないよう十分な下部余白 pb-safe-screen を確保） */}
+      <main className="flex-1 w-full max-w-2xl mx-auto px-4 pt-5 pb-safe-screen">
+        {/* サービス全体終了時 */}
+        {isGlobalEnded ? (
+          <div className="tactile-card p-6 sm:p-8 text-center bg-red-50 my-4">
+            <div className="flex justify-center mb-4">
+              <PixelIcon name="stop" size={64} />
+            </div>
+            <h2 className="text-2xl sm:text-3xl font-black text-red-700 mb-3">
+              クイズの時間が終了しました！
+            </h2>
+            <p className="text-lg font-bold text-gray-800 mb-6">
+              たくさんのご参加ありがとうございました！下のボタンから、あなたが解いた問題の正解と解説を見ることができます。
+            </p>
+            <button
+              type="button"
+              onClick={() => {
+                setViewMode('history');
+                setIsGlobalEnded(false);
+                fetchHistory(userId);
+              }}
+              className="w-full tactile-btn bg-emerald-700 hover:bg-emerald-600 text-white py-4 px-6 font-black text-xl flex items-center justify-center gap-3"
+            >
+              <PixelIcon name="trophy" size={28} />
+              <span>自分のけっか・解説を見る</span>
+            </button>
+          </div>
+        ) : viewMode === 'history' && isRegistered ? (
+          /* ==========================================
+             プレイヤー用「けっか・履歴」ダッシュボード
+             ========================================== */
+          <div className="space-y-6">
+            <div className="tactile-card p-5 bg-emerald-50 flex flex-col sm:flex-row items-center justify-between gap-4">
+              <div className="flex items-center gap-3">
+                <PixelIcon name="trophy" size={44} />
+                <div>
+                  <h2 className="text-2xl font-black text-gray-900">
+                    {name} さんのプレイけっか
+                  </h2>
+                  <p className="text-sm sm:text-base font-bold text-gray-700">
+                    これまでに挑戦したクイズの得点と、問題の正解・解説が確認できます。
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => fetchHistory(userId)}
+                className="tactile-btn bg-white hover:bg-gray-100 text-gray-900 px-4 py-2 font-black text-sm whitespace-nowrap"
+              >
+                最新の情報に更新
+              </button>
+            </div>
+
+            {isLoadingHistory && historyData.length === 0 ? (
+              <div className="tactile-card p-8 text-center font-black text-lg">
+                けっかを読み込んでいます...
+              </div>
+            ) : historyData.length === 0 ? (
+              <div className="tactile-card p-8 text-center space-y-4">
+                <div className="flex justify-center">
+                  <PixelIcon name="camera" size={56} />
+                </div>
+                <p className="text-xl font-black text-gray-800">
+                  まだ回答したクイズがありません！
+                </p>
+                <p className="text-base font-bold text-gray-600">
+                  教室にあるQRコードを読み取って、クイズに答えるとここに結果が表示されます。
+                </p>
+                <button
+                  type="button"
+                  onClick={() => setViewMode('quiz')}
+                  className="tactile-btn bg-blue-700 text-white px-8 py-4 font-black text-lg inline-flex items-center gap-2"
+                >
+                  <PixelIcon name="camera" size={24} />
+                  <span>クイズ画面へ行く</span>
+                </button>
+              </div>
+            ) : (
+              historyData.map((h) => {
+                const isEnded = h.play_status === 'ended';
+                const anyPendingAfterEnd =
+                  !isEnded &&
+                  h.questions &&
+                  h.questions.some((q) => q.selected_index !== undefined && !q.can_view_detail);
+
+                return (
+                  <div key={h.quiz_id} className="tactile-card overflow-hidden bg-white">
+                    {/* クイズイベントヘッダー */}
+                    <div className="p-5 bg-amber-100 border-b-[3px] border-gray-900 flex flex-wrap justify-between items-center gap-3">
+                      <div>
+                        <span className="inline-block bg-white border-2 border-gray-900 px-2.5 py-0.5 rounded-md text-xs font-black mr-2">
+                          コード: {h.code}
+                        </span>
+                        <h3 className="text-xl sm:text-2xl font-black text-gray-900 mt-1">
+                          {h.title}
+                        </h3>
+                      </div>
+                      <div>
+                        {isEnded ? (
+                          <span className="inline-flex items-center gap-1.5 bg-gray-900 text-white text-sm font-black px-3 py-1.5 rounded-lg">
+                            <PixelIcon name="flag" size={18} />
+                            <span>回答終了（全結果公開中）</span>
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1.5 bg-emerald-700 text-white text-sm font-black px-3 py-1.5 rounded-lg border-2 border-gray-900">
+                            <PixelIcon name="clock" size={18} />
+                            <span>開催中</span>
+                          </span>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* スコアサマリー */}
+                    <div className="p-5 bg-amber-50/60 border-b-[3px] border-gray-900 grid grid-cols-2 sm:grid-cols-3 gap-3 text-center">
+                      <div className="bg-white p-3 rounded-xl border-2 border-gray-900">
+                        <p className="text-xs sm:text-sm font-black text-gray-600">回答した数</p>
+                        <p className="text-xl sm:text-2xl font-black text-gray-900">
+                          {h.answered_count || 0} <span className="text-base">/ {h.total_questions || (h.questions ? h.questions.length : 0)} 問</span>
+                        </p>
+                      </div>
+                      <div className="bg-white p-3 rounded-xl border-2 border-gray-900">
+                        <p className="text-xs sm:text-sm font-black text-gray-600">現在の正解数</p>
+                        <p className="text-xl sm:text-2xl font-black text-emerald-700">
+                          {anyPendingAfterEnd ? '終了後に発表' : `${h.correct_count || 0} 問`}
+                        </p>
+                      </div>
+                      <div className="col-span-2 sm:col-span-1 bg-white p-3 rounded-xl border-2 border-gray-900">
+                        <p className="text-xs sm:text-sm font-black text-gray-600">合計ポイント</p>
+                        <p className="text-2xl sm:text-3xl font-black text-blue-700">
+                          {anyPendingAfterEnd ? '???' : h.total_score || 0} <span className="text-base">pt</span>
+                        </p>
+                      </div>
+                    </div>
+
+                    {/* 問題ごとの詳細リスト */}
+                    <div className="p-5 space-y-4">
+                      <h4 className="font-black text-lg text-gray-900 flex items-center gap-2">
+                        <PixelIcon name="book" size={24} />
+                        <span>問題ごとの結果と解説</span>
+                      </h4>
+
+                      {h.questions &&
+                        h.questions.map((q, qIdx) => {
+                          const hasAnswered = q.selected_index !== undefined && q.selected_index !== null && q.selected_index >= 0;
+
+                          return (
+                            <div
+                              key={q.id || qIdx}
+                              className="p-4 rounded-xl border-2 border-gray-900 bg-[#FFFDF7] space-y-3"
+                            >
+                              <div className="flex flex-wrap items-center justify-between gap-2">
+                                <div className="flex items-center gap-2">
+                                  <span className="bg-gray-900 text-white font-black text-sm px-2.5 py-1 rounded">
+                                    第 {qIdx + 1} 問
+                                  </span>
+                                  {q.code && (
+                                    <span className="bg-amber-100 border border-gray-900 text-gray-900 font-mono font-bold text-xs px-2 py-0.5 rounded">
+                                      コード: {q.code}
+                                    </span>
+                                  )}
+                                </div>
+
+                                {!hasAnswered ? (
+                                  <span className="bg-gray-200 text-gray-800 font-black text-sm px-3 py-1 rounded-lg border border-gray-900">
+                                    未回答
+                                  </span>
+                                ) : !q.can_view_detail ? (
+                                  <span className="inline-flex items-center gap-1.5 bg-amber-200 text-gray-900 font-black text-sm px-3 py-1 rounded-lg border-2 border-gray-900">
+                                    <PixelIcon name="lock" size={18} />
+                                    <span>回答済み（終了後に結果発表！）</span>
+                                  </span>
+                                ) : q.is_correct ? (
+                                  <span className="inline-flex items-center gap-1.5 bg-red-100 text-red-800 font-black text-base px-3 py-1 rounded-lg border-2 border-red-700">
+                                    <PixelIcon name="correct" size={20} />
+                                    <span>せいかい！ (+{q.points_awarded ?? q.points} pt)</span>
+                                  </span>
+                                ) : (
+                                  <span className="inline-flex items-center gap-1.5 bg-blue-100 text-blue-900 font-black text-base px-3 py-1 rounded-lg border-2 border-blue-800">
+                                    <PixelIcon name="wrong" size={20} />
+                                    <span>ざんねん… ({q.points_awarded ?? 0} pt)</span>
+                                  </span>
+                                )}
+                              </div>
+
+                              <p className="text-base sm:text-lg font-black text-gray-900">
+                                {q.text}
+                              </p>
+
+                              {hasAnswered && (
+                                <p className="text-sm sm:text-base font-bold text-gray-800">
+                                  あなたが選んだ答え：{' '}
+                                  <span className="font-black underline">
+                                    {['A', 'B', 'C', 'D'][q.selected_index] || ''}「
+                                    {q.options && q.options[q.selected_index]
+                                      ? q.options[q.selected_index]
+                                      : '記録なし'}
+                                    」
+                                  </span>
+                                </p>
+                              )}
+
+                              {q.can_view_detail ? (
+                                <div className="pt-2 border-t-2 border-dashed border-gray-300 space-y-2">
+                                  {q.correct_index >= 0 && q.options && (
+                                    <p className="text-sm sm:text-base font-black text-emerald-800">
+                                      正しい答え： {['A', 'B', 'C', 'D'][q.correct_index]}「
+                                      {q.options[q.correct_index]}」
+                                    </p>
+                                  )}
+                                  {q.explanation && (
+                                    <div className="bg-white p-3 rounded-lg border-2 border-gray-900 text-sm sm:text-base text-gray-900">
+                                      <span className="font-black text-blue-800 block mb-1">
+                                        【かいせつ】
+                                      </span>
+                                      {q.explanation}
+                                    </div>
+                                  )}
+                                </div>
+                              ) : (
+                                <div className="p-3 rounded-lg bg-amber-100/70 border border-amber-500 text-sm font-bold text-gray-800">
+                                  この問題は「クイズの制限時間が終わってから結果を見られる」設定になっています。終了まで楽しみにお待ちください！
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                    </div>
                   </div>
-                  
-                  {explanation && (
-                    <div className="bg-slate-900 p-4 rounded-xl text-sm text-slate-300 mb-6 border border-slate-700">
-                      <p className="font-bold text-blue-400 mb-1">📝 解説</p>
-                      <p className="leading-relaxed">{explanation}</p>
+                );
+              })
+            )}
+          </div>
+        ) : !isRegistered ? (
+          /* ==========================================
+             1. 参加者エントリー画面（子ども・シニアにも優しい大きな入力欄）
+             ========================================== */
+          <form onSubmit={handleRegister} className="tactile-card p-6 sm:p-8 space-y-6 my-2">
+            <div className="flex items-center gap-3 border-b-[3px] border-gray-900 pb-4">
+              <PixelIcon name="user" size={42} />
+              <div>
+                <h2 className="text-2xl sm:text-3xl font-black text-gray-900">
+                  さんか登録（エントリー）
+                </h2>
+                <p className="text-sm sm:text-base font-bold text-gray-700">
+                  お名前を入れて、すぐクイズをはじめよう！
+                </p>
+              </div>
+            </div>
+
+            <div className="space-y-5">
+              <div>
+                <label className="block text-base sm:text-lg font-black text-gray-900 mb-2">
+                  1. お名前（ニックネームでもOK！） <span className="text-red-600">*</span>
+                </label>
+                <input
+                  type="text"
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  placeholder="れい：たろう"
+                  maxLength={16}
+                  className="w-full bg-amber-50/50 border-[3px] border-gray-900 rounded-xl px-4 py-3.5 text-lg sm:text-xl font-black text-gray-900 focus:bg-white focus:outline-none focus:ring-4 focus:ring-blue-300"
+                />
+                <p className="text-xs sm:text-sm font-bold text-gray-600 mt-1">
+                  ※16文字まで。記号は使えません。
+                </p>
+              </div>
+
+              <div>
+                <label className="block text-base sm:text-lg font-black text-gray-900 mb-2">
+                  2. 学籍番号 または 受付番号（なければ空欄でOK）
+                </label>
+                <input
+                  type="text"
+                  value={studentId}
+                  onChange={(e) => setStudentId(e.target.value)}
+                  placeholder="れい：12345（空欄でも参加できます）"
+                  className="w-full bg-amber-50/50 border-[3px] border-gray-900 rounded-xl px-4 py-3.5 text-lg sm:text-xl font-black text-gray-900 focus:bg-white focus:outline-none focus:ring-4 focus:ring-blue-300"
+                />
+              </div>
+
+              <div className="bg-amber-50 p-4 sm:p-5 rounded-xl border-[3px] border-gray-900 space-y-4">
+                <p className="text-gray-900 font-black text-base">
+                  3. 参加するまえに、2つのルールにチェックを入れてください：
+                </p>
+
+                <label className="flex items-center gap-3 cursor-pointer p-2 bg-white rounded-lg border-2 border-gray-900">
+                  <input
+                    type="checkbox"
+                    checked={tosAgreed}
+                    onChange={(e) => setTosAgreed(e.target.checked)}
+                    className="w-7 h-7 accent-blue-700 rounded cursor-pointer flex-shrink-0"
+                  />
+                  <span className="text-base sm:text-lg font-bold text-gray-900">
+                    <button
+                      type="button"
+                      onClick={() => setActiveModal('pashatoku')}
+                      className="text-blue-700 underline font-black hover:text-blue-900"
+                    >
+                      パシャトク利用規約
+                    </button>{' '}
+                    に同意します
+                  </span>
+                </label>
+
+                <label className="flex items-center gap-3 cursor-pointer p-2 bg-white rounded-lg border-2 border-gray-900">
+                  <input
+                    type="checkbox"
+                    checked={hostTosAgreed}
+                    onChange={(e) => setHostTosAgreed(e.target.checked)}
+                    className="w-7 h-7 accent-emerald-700 rounded cursor-pointer flex-shrink-0"
+                  />
+                  <span className="text-base sm:text-lg font-bold text-gray-900">
+                    <button
+                      type="button"
+                      onClick={() => setActiveModal('host')}
+                      className="text-emerald-800 underline font-black hover:text-emerald-950"
+                    >
+                      イベントのお約束（主催者規約）
+                    </button>{' '}
+                    に同意します
+                  </span>
+                </label>
+              </div>
+            </div>
+
+            {error && (
+              <div className="p-4 rounded-xl border-[3px] border-red-700 bg-red-100 text-red-900 font-black text-base text-center">
+                {error}
+              </div>
+            )}
+
+            <button
+              type="submit"
+              className="w-full tactile-btn bg-blue-700 hover:bg-blue-600 text-white py-4 px-6 font-black text-xl sm:text-2xl flex items-center justify-center gap-3"
+            >
+              <PixelIcon name="check" size={30} />
+              <span>スタート！（参加する）</span>
+            </button>
+
+            <div className="pt-4 border-t-2 border-gray-200 text-center">
+              <a
+                href="/admin"
+                className="inline-flex items-center gap-1.5 text-gray-600 text-sm font-bold hover:text-gray-900 underline"
+              >
+                <PixelIcon name="gear" size={18} />
+                <span>スタッフ・管理者画面はこちら</span>
+              </a>
+            </div>
+          </form>
+        ) : !quizData ? (
+          /* ==========================================
+             2. QRコード読み取り ＆ 3桁コード入力画面
+             ========================================== */
+          <div className="space-y-6">
+            {/* 参加者バッジ */}
+            <div className="tactile-card p-4 bg-emerald-50 flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center gap-3">
+                <PixelIcon name="check" size={32} />
+                <div>
+                  <p className="text-xs font-black text-emerald-800">参加中のお名前</p>
+                  <p className="text-lg sm:text-xl font-black text-gray-900">{name} さん</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={handleResetRegistration}
+                className="text-sm font-black text-gray-700 underline hover:text-red-700 px-2 py-1"
+              >
+                お名前を変更する
+              </button>
+            </div>
+
+            {error && (
+              <div className="tactile-card p-4 border-red-700 bg-red-100 text-red-900 font-black text-base sm:text-lg text-center">
+                {error}
+              </div>
+            )}
+
+            {!quizCode ? (
+              <div className="space-y-6">
+                {/* 方法①：番号（コード）を直接入力する（カメラが苦手な方やシニア・子どもでも一番確実！） */}
+                <div className="tactile-card p-5 sm:p-6 bg-white space-y-4">
+                  <div className="flex items-center gap-3">
+                    <div className="bg-amber-200 p-2 rounded-xl border-2 border-gray-900">
+                      <PixelIcon name="book" size={32} />
+                    </div>
+                    <div>
+                      <h2 className="text-xl sm:text-2xl font-black text-gray-900">
+                        方法①：クイズの番号（コード）を入れる
+                      </h2>
+                      <p className="text-sm sm:text-base font-bold text-gray-700">
+                        教室に書いてある文字・数字を入れてボタンを押してください
+                      </p>
+                    </div>
+                  </div>
+
+                  <form
+                    onSubmit={(e) => {
+                      e.preventDefault();
+                      if (manualCodeInput.trim()) {
+                        startQuizByCode(manualCodeInput);
+                      }
+                    }}
+                    className="flex flex-col sm:flex-row gap-3"
+                  >
+                    <input
+                      type="text"
+                      value={manualCodeInput}
+                      onChange={(e) => setManualCodeInput(e.target.value)}
+                      placeholder="ここにコードを入力（例: demo1）"
+                      className="flex-1 bg-amber-50 border-[3px] border-gray-900 rounded-xl px-4 py-3.5 text-xl font-mono font-black text-center text-gray-900 focus:bg-white focus:outline-none"
+                    />
+                    <button
+                      type="submit"
+                      disabled={!manualCodeInput.trim() || isLoadingQuiz}
+                      className="tactile-btn bg-blue-700 hover:bg-blue-600 text-white px-8 py-4 font-black text-xl whitespace-nowrap"
+                    >
+                      {isLoadingQuiz ? 'よみこみ中...' : '問題をひらく！'}
+                    </button>
+                  </form>
+                </div>
+
+                {/* 方法②：カメラでQRコードを写す */}
+                <div className="tactile-card p-5 sm:p-6 bg-white space-y-4">
+                  <div className="flex items-center gap-3">
+                    <div className="bg-blue-100 p-2 rounded-xl border-2 border-gray-900">
+                      <PixelIcon name="camera" size={32} />
+                    </div>
+                    <div>
+                      <h2 className="text-xl sm:text-2xl font-black text-gray-900">
+                        方法②：カメラでQRコードを読み取る
+                      </h2>
+                      <p className="text-sm sm:text-base font-bold text-gray-700">
+                        下のカメラ枠に、教室のQRコードをうつしてください
+                      </p>
+                    </div>
+                  </div>
+
+                  <div id="reader" className="w-full"></div>
+                </div>
+              </div>
+            ) : (
+              /* QRスキャン直後・読み込み画面 */
+              <div className="tactile-card p-8 text-center bg-amber-50 space-y-6">
+                <div className="flex justify-center">
+                  <PixelIcon name="camera" size={64} />
+                </div>
+                <h2 className="text-2xl sm:text-3xl font-black text-gray-900">
+                  クイズを見つけました！
+                </h2>
+                <div className="bg-white border-[3px] border-gray-900 rounded-xl py-3 px-6 inline-block">
+                  <span className="text-sm font-black text-gray-600 block">クイズコード</span>
+                  <span className="text-2xl sm:text-3xl font-mono font-black text-blue-700">
+                    {quizCode}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => startQuizByCode(quizCode)}
+                  disabled={isLoadingQuiz}
+                  className="w-full tactile-btn bg-blue-700 hover:bg-blue-600 text-white py-4 px-8 font-black text-2xl"
+                >
+                  {isLoadingQuiz ? 'よみこみ中...' : 'クイズをスタート！'}
+                </button>
+                <button
+                  type="button"
+                  onClick={resetToScanner}
+                  className="tactile-btn bg-white hover:bg-gray-100 text-gray-900 py-3 px-6 font-black text-base"
+                >
+                  べつのQRコードを読み直す
+                </button>
+              </div>
+            )}
+          </div>
+        ) : isFinished ? (
+          /* ==========================================
+             3. 1セット解き終わった後の完了画面
+             ========================================== */
+          <div className="tactile-card p-6 sm:p-8 text-center bg-amber-50 space-y-6 my-4">
+            <div className="flex justify-center">
+              <PixelIcon name="trophy" size={72} />
+            </div>
+            <div>
+              <h2 className="text-3xl sm:text-4xl font-black text-gray-900 mb-2">
+                回答かんりょう！
+              </h2>
+              <p className="text-lg sm:text-xl font-black text-blue-800">{quizData.title}</p>
+            </div>
+
+            {effectiveDisplay === 'after_end' && quizData.play_status !== 'ended' ? (
+              <div className="tactile-card p-6 bg-white space-y-3">
+                <PixelIcon name="lock" size={44} />
+                <p className="text-xl font-black text-gray-900">
+                  あなたの回答をしっかり記録しました！
+                </p>
+                <p className="text-base font-bold text-gray-700">
+                  このクイズは、制限時間が終わってから「けっか・履歴」画面で正解と得点が発表されます。楽しみにしていてくださいね！
+                </p>
+              </div>
+            ) : (
+              <div className="tactile-card p-6 bg-white">
+                <p className="text-base sm:text-lg font-black text-gray-700 mb-1">
+                  今回かくとくしたポイント
+                </p>
+                <p className="text-5xl sm:text-6xl font-black text-blue-700">
+                  {score} <span className="text-2xl text-gray-900">pt</span>
+                </p>
+              </div>
+            )}
+
+            <div className="flex flex-col sm:flex-row gap-4 pt-2">
+              <button
+                type="button"
+                onClick={resetToScanner}
+                className="flex-1 tactile-btn bg-blue-700 hover:bg-blue-600 text-white py-4 px-6 font-black text-xl flex items-center justify-center gap-2"
+              >
+                <PixelIcon name="camera" size={26} />
+                <span>つぎのQRコードを探す</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setViewMode('history');
+                  fetchHistory(userId);
+                }}
+                className="flex-1 tactile-btn bg-emerald-700 hover:bg-emerald-600 text-white py-4 px-6 font-black text-xl flex items-center justify-center gap-2"
+              >
+                <PixelIcon name="trophy" size={26} />
+                <span>けっか・解説を見る</span>
+              </button>
+            </div>
+          </div>
+        ) : quizData.play_status === 'waiting' ? (
+          /* ==========================================
+             4. 開始前の待機画面（開始されたら自動で問題が開きます）
+             ========================================== */
+          <div className="tactile-card p-8 text-center bg-amber-50 space-y-5 my-4">
+            <div className="flex justify-center">
+              <PixelIcon name="clock" size={64} />
+            </div>
+            <h2 className="text-2xl sm:text-3xl font-black text-gray-900">
+              はじまるのを待っています！
+            </h2>
+            <p className="text-xl font-black text-blue-800">{quizData.title}</p>
+            <p className="text-base sm:text-lg font-bold text-gray-800 bg-white p-4 rounded-xl border-2 border-gray-900">
+              スタッフが「開始」ボタンを押すと、自動的にクイズ画面に切り替わります。このまま少しだけお待ちください！
+            </p>
+            <button
+              type="button"
+              onClick={resetToScanner}
+              className="tactile-btn bg-white hover:bg-gray-100 text-gray-900 py-3 px-6 font-black text-base"
+            >
+              もどる
+            </button>
+          </div>
+        ) : quizData.play_status === 'ended' ? (
+          /* ==========================================
+             5. 終了済みイベント画面
+             ========================================== */
+          <div className="tactile-card p-8 text-center bg-white space-y-5 my-4">
+            <div className="flex justify-center">
+              <PixelIcon name="flag" size={64} />
+            </div>
+            <h2 className="text-2xl sm:text-3xl font-black text-gray-900">
+              このクイズの回答時間は終了しました
+            </h2>
+            <p className="text-lg font-bold text-gray-700">{quizData.title}</p>
+            <div className="flex flex-col sm:flex-row gap-3 pt-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setViewMode('history');
+                  fetchHistory(userId);
+                }}
+                className="flex-1 tactile-btn bg-emerald-700 hover:bg-emerald-600 text-white py-4 px-6 font-black text-lg flex items-center justify-center gap-2"
+              >
+                <PixelIcon name="trophy" size={24} />
+                <span>けっか・正解を見る</span>
+              </button>
+              <button
+                type="button"
+                onClick={resetToScanner}
+                className="flex-1 tactile-btn bg-white hover:bg-gray-100 text-gray-900 py-4 px-6 font-black text-lg"
+              >
+                スキャン画面へもどる
+              </button>
+            </div>
+          </div>
+        ) : (
+          /* ==========================================
+             6. クイズ出題・回答プレイ画面
+             ========================================== */
+          <div className="space-y-5">
+            {/* タイトルと問題番号バー */}
+            <div className="tactile-card p-4 bg-amber-100 flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={resetToScanner}
+                  className="bg-white border-2 border-gray-900 px-3 py-1 rounded-lg font-black text-sm hover:bg-gray-100"
+                >
+                  ← もどる
+                </button>
+                <span className="font-black text-base sm:text-lg text-gray-900">
+                  {quizData.title}
+                </span>
+              </div>
+              <span className="bg-gray-900 text-white font-black text-base px-3.5 py-1 rounded-lg">
+                だい {currentQIndex + 1} もん / 全 {quizData.questions.length} 問
+              </span>
+            </div>
+
+            {error && (
+              <div className="tactile-card p-4 border-red-700 bg-red-100 text-red-900 font-black text-base text-center">
+                {error}
+              </div>
+            )}
+
+            {/* GPSチェック中 */}
+            {!gpsVerified ? (
+              <div className="tactile-card p-8 text-center bg-white space-y-4">
+                <div className="flex justify-center">
+                  <PixelIcon name="pin" size={56} />
+                </div>
+                <h3 className="text-2xl font-black text-gray-900">場所（GPS）をチェック中</h3>
+                <p className="text-lg font-bold text-gray-700">{gpsError}</p>
+                {gpsError && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setGpsVerified(false);
+                      setGpsError('もう一度チェックしています...');
+                      verifyGps(
+                        quizData.questions[currentQIndex].lat,
+                        quizData.questions[currentQIndex].lng,
+                        quizData.questions[currentQIndex].radius || 50
+                      )
+                        .then(() => setGpsVerified(true))
+                        .catch((e) => setGpsError(e));
+                    }}
+                    className="tactile-btn bg-blue-700 text-white px-8 py-3 font-black text-lg"
+                  >
+                    もう一度ためす
+                  </button>
+                )}
+              </div>
+            ) : quizData.questions[currentQIndex] &&
+              answeredQuestionIds.some(
+                (id) => String(id) === String(quizData.questions[currentQIndex].id)
+              ) &&
+              !showAnswer ? (
+              /* すでに回答済みの問題を開いた場合 */
+              <div className="tactile-card p-8 text-center bg-white space-y-5">
+                <div className="flex justify-center">
+                  <PixelIcon name="check" size={64} />
+                </div>
+                <h2 className="text-2xl sm:text-3xl font-black text-emerald-800">
+                  この問題はすでに回答ずみです！
+                </h2>
+                <p className="text-base sm:text-lg font-bold text-gray-700">
+                  教室にある別のQRコードを探すか、「けっか・履歴」からこれまでの記録を見てみましょう！
+                </p>
+                <div className="flex flex-col sm:flex-row gap-3">
+                  {currentQIndex < quizData.questions.length - 1 && (
+                    <button
+                      type="button"
+                      onClick={nextQuestion}
+                      className="flex-1 tactile-btn bg-blue-700 text-white py-4 px-6 font-black text-lg"
+                    >
+                      つぎの問題へすすむ
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={resetToScanner}
+                    className="flex-1 tactile-btn bg-amber-400 text-gray-900 py-4 px-6 font-black text-lg flex items-center justify-center gap-2"
+                  >
+                    <PixelIcon name="camera" size={24} />
+                    <span>別のQRコードを読み取る</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setViewMode('history');
+                      fetchHistory(userId);
+                    }}
+                    className="flex-1 tactile-btn bg-emerald-700 text-white py-4 px-6 font-black text-lg flex items-center justify-center gap-2"
+                  >
+                    <PixelIcon name="trophy" size={24} />
+                    <span>けっかを見る</span>
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <>
+                {/* 問題文カード */}
+                <div className="tactile-card p-5 sm:p-6 bg-white space-y-4">
+                  {quizData.style === 'fastest' && (
+                    <div className="bg-red-600 text-white px-4 py-2 rounded-xl border-2 border-gray-900 font-black text-sm sm:text-base flex items-center justify-center gap-2">
+                      <PixelIcon name="bolt" size={22} />
+                      <span>早押しモード！いちばん早く正解した人がポイントゲット！</span>
                     </div>
                   )}
 
-                  <button onClick={nextQuestion} className="w-full bg-blue-600 text-white px-8 py-4 rounded-xl font-black shadow-lg hover:bg-blue-500 transition-all">
-                    {currentQIndex < quizData.questions.length - 1 ? '次の問題へ' : '結果を見る'}
-                  </button>
+                  <div className="flex flex-wrap justify-between items-center gap-2">
+                    <span className="bg-emerald-100 text-emerald-900 border-2 border-gray-900 text-sm sm:text-base font-black px-3.5 py-1 rounded-lg">
+                      もらえる得点: {quizData.questions[currentQIndex].points} ポイント
+                    </span>
+                    {quizData.questions[currentQIndex].penalty_points > 0 && (
+                      <span className="bg-red-100 text-red-900 border-2 border-gray-900 text-sm sm:text-base font-black px-3.5 py-1 rounded-lg">
+                        まちがえると: -{quizData.questions[currentQIndex].penalty_points} ポイント
+                      </span>
+                    )}
+                  </div>
+
+                  <h2 className="text-xl sm:text-2xl font-black text-gray-900 leading-relaxed py-2">
+                    {quizData.questions[currentQIndex].text}
+                  </h2>
+
+                  {quizData.questions[currentQIndex].media_url && (
+                    <img
+                      src={quizData.questions[currentQIndex].media_url}
+                      alt="問題イラスト"
+                      className="w-full h-auto rounded-xl border-[3px] border-gray-900"
+                    />
+                  )}
+
+                  {/* ヒントボタン */}
+                  {quizData.questions[currentQIndex].hint && !showAnswer && !isLocked && (
+                    <div className="pt-2">
+                      {!hintUsed ? (
+                        <button
+                          type="button"
+                          onClick={() => setHintUsed(true)}
+                          className="w-full tactile-btn bg-amber-200 hover:bg-amber-300 text-gray-900 py-3 px-4 font-black text-base sm:text-lg flex items-center justify-center gap-2"
+                        >
+                          <PixelIcon name="bulb" size={26} />
+                          <span>ヒントを見る（もらえる得点が半分になります）</span>
+                        </button>
+                      ) : (
+                        <div className="bg-amber-100 border-[3px] border-gray-900 p-4 rounded-xl text-gray-900 text-base sm:text-lg font-black flex items-start gap-3">
+                          <PixelIcon name="bulb" size={28} />
+                          <div>
+                            <span className="block text-sm text-amber-900">【ヒント】</span>
+                            {quizData.questions[currentQIndex].hint}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
-              )}
-            </>
-          )}
-        </div>
-      )}
+
+                {/* 早押しロック時 */}
+                {isLocked ? (
+                  <div className="tactile-card p-6 sm:p-8 bg-red-50 text-center space-y-4">
+                    <div className="flex justify-center">
+                      <PixelIcon name="lock" size={56} />
+                    </div>
+                    <h3 className="text-2xl font-black text-red-800">ざんねん！ロックされました</h3>
+                    <p className="text-lg font-bold text-gray-800">{lockMessage}</p>
+                    <button
+                      type="button"
+                      onClick={nextQuestion}
+                      className="w-full tactile-btn bg-blue-700 text-white py-4 px-8 font-black text-xl"
+                    >
+                      つぎへすすむ
+                    </button>
+                  </div>
+                ) : (
+                  /* 4択の大きなボタン */
+                  <div className="space-y-3.5">
+                    <p className="text-base font-black text-gray-700 px-1">
+                      ↓ 正しいと思うボタンを1つ押してください：
+                    </p>
+                    {quizData.questions[currentQIndex].options.map((opt, i) => {
+                      const isSelected = i === selectedOption;
+                      const styleInfo = optionStyles[i] || optionStyles[0];
+
+                      let cardClass =
+                        'w-full tactile-btn text-left p-4 sm:p-5 font-black text-lg sm:text-xl flex items-center gap-4 ';
+
+                      if (!showAnswer) {
+                        cardClass += `bg-white text-gray-900 ${styleInfo.hoverBg}`;
+                      } else if (effectiveDisplay === 'after_end') {
+                        if (isSelected) {
+                          cardClass += 'bg-amber-200 text-gray-900 ring-4 ring-amber-400';
+                        } else {
+                          cardClass += 'bg-gray-100 text-gray-500 opacity-75';
+                        }
+                      } else {
+                        // Immediate result display
+                        if (isSelected) {
+                          cardClass += isCorrect
+                            ? 'bg-red-100 text-red-950 ring-4 ring-red-500'
+                            : 'bg-blue-100 text-blue-950 ring-4 ring-blue-500';
+                        } else if (i === correctIndex) {
+                          cardClass += 'bg-emerald-100 text-emerald-950 ring-4 ring-emerald-500';
+                        } else {
+                          cardClass += 'bg-gray-100 text-gray-500 opacity-70';
+                        }
+                      }
+
+                      return (
+                        <button
+                          key={i}
+                          type="button"
+                          disabled={showAnswer}
+                          onClick={() => handleOptionSelect(i)}
+                          className={cardClass}
+                        >
+                          <span
+                            className={`w-11 h-11 sm:w-12 sm:h-12 flex-shrink-0 flex items-center justify-center rounded-xl border-2 border-gray-900 text-xl sm:text-2xl font-black ${styleInfo.badgeBg}`}
+                          >
+                            {styleInfo.label}
+                          </span>
+                          <span className="flex-1 break-words leading-snug">{opt}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {/* 回答直後のフィードバック表示（即表示モード or 終了後発表モード） */}
+                {showAnswer && !isLocked && (
+                  <div className="tactile-card p-6 bg-white space-y-5">
+                    {effectiveDisplay === 'after_end' ? (
+                      <div className="text-center space-y-3 bg-amber-50 p-5 rounded-xl border-2 border-gray-900">
+                        <div className="flex justify-center">
+                          <PixelIcon name="check" size={52} />
+                        </div>
+                        <p className="text-2xl font-black text-gray-900">
+                          回答を受け付けました！
+                        </p>
+                        <p className="text-base sm:text-lg font-bold text-gray-800">
+                          あなたが選んだ答え：{' '}
+                          <span className="font-black underline">
+                            {['A', 'B', 'C', 'D'][selectedOption]}「
+                            {quizData.questions[currentQIndex].options[selectedOption]}」
+                          </span>
+                        </p>
+                        <p className="text-sm sm:text-base font-bold text-amber-900 bg-amber-200/70 p-3 rounded-lg border border-gray-900">
+                          この問題は「クイズの制限時間が終わってから正解・解説が見られる」設定になっています。終了後に「けっか・履歴」ボタンを押して確認してね！
+                        </p>
+                      </div>
+                    ) : (
+                      <>
+                        <div
+                          className={`p-5 rounded-xl border-[3px] border-gray-900 text-center space-y-2 ${
+                            isCorrect ? 'bg-red-50' : 'bg-blue-50'
+                          }`}
+                        >
+                          <div className="flex justify-center">
+                            <PixelIcon name={isCorrect ? 'correct' : 'wrong'} size={56} />
+                          </div>
+                          <p
+                            className={`text-3xl font-black ${
+                              isCorrect ? 'text-red-700' : 'text-blue-800'
+                            }`}
+                          >
+                            {isCorrect ? 'やったね！せいかい！' : 'おしい！ざんねん…'}
+                          </p>
+                          <p className="text-lg font-black text-gray-900">
+                            かくとくポイント：{' '}
+                            <span
+                              className={
+                                awardedPoints > 0 ? 'text-emerald-700 text-2xl' : 'text-red-700 text-2xl'
+                              }
+                            >
+                              {awardedPoints > 0 ? `+${awardedPoints}` : awardedPoints} pt
+                            </span>
+                          </p>
+                          {!isCorrect &&
+                            correctIndex >= 0 &&
+                            quizData.questions[currentQIndex].options[correctIndex] && (
+                              <p className="text-base sm:text-lg font-black text-emerald-800 pt-1">
+                                正しい答え： {['A', 'B', 'C', 'D'][correctIndex]}「
+                                {quizData.questions[currentQIndex].options[correctIndex]}」
+                              </p>
+                            )}
+                        </div>
+
+                        {explanation && (
+                          <div className="bg-amber-50 p-4 sm:p-5 rounded-xl border-2 border-gray-900 space-y-1.5">
+                            <div className="flex items-center gap-2 font-black text-blue-800 text-base sm:text-lg">
+                              <PixelIcon name="book" size={24} />
+                              <span>【かいせつ】</span>
+                            </div>
+                            <p className="text-base sm:text-lg font-bold text-gray-900 leading-relaxed">
+                              {explanation}
+                            </p>
+                          </div>
+                        )}
+                      </>
+                    )}
+
+                    <button
+                      type="button"
+                      onClick={nextQuestion}
+                      className="w-full tactile-btn bg-blue-700 hover:bg-blue-600 text-white py-4 px-8 font-black text-xl sm:text-2xl"
+                    >
+                      {currentQIndex < quizData.questions.length - 1
+                        ? 'つぎの問題へすすむ →'
+                        : 'さいごの結果画面へ →'}
+                    </button>
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        )}
+      </main>
     </div>
-  )
+  );
 }
 
-export default App
+export default App;

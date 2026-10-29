@@ -23,18 +23,21 @@ It is **not** a hosted quiz service — instead, it provides the technical found
 
 This repository provides **only** the source code.
 
+> **⚠️ Requires Docker Compose V2 (`docker compose`)**
+> Please make sure to launch the containers using the **Docker Compose V2** command (`docker compose`, separated by a space) instead of the deprecated V1 command (`docker-compose`, with a hyphen).
+
 To use it:
 
 1. Clone this repository
-2. Deploy it to your own web server
+2. Deploy it to your own web server using Docker Compose V2
 3. Edit the quiz contents and code as needed
 
 ```bash
 git clone https://github.com/MotoYucchi/pashatoku.com
 cd pashatoku.com/app
-docker-compose up -build
-# Serve with your favorite dynamic server
-````
+docker compose up -d --build
+# Or run start.bat (Windows) / start.sh (Linux/macOS) from the project root
+```
 
 ---
 
@@ -76,17 +79,20 @@ This is a development template for building your own self-hosted solution.
 
 このリポジトリは **ソースコードのみ** を提供します。
 
+> **⚠️ Docker Compose V2（`docker compose`）必須**
+> 起動時は旧式の V1 コマンド（ハイフンつきの `docker-compose`）ではなく、必ず **Docker Compose V2 コマンド（スペース区切りの `docker compose`）** を使用してください。
+
 使用方法：
 
 1. リポジトリをクローン
-2. 自前サーバーでホスト
+2. Docker Compose V2（`docker compose`）で自前サーバーにコンテナを起動
 3. 必要に応じてコードや問題内容を編集
 
 ```bash
 git clone https://github.com/MotoYucchi/pashatoku.com
 cd pashatoku.com/app
-docker-compose up -build
-# 動的サーバーで配信
+docker compose up -d --build
+# またはルートディレクトリの start.bat / start.sh を実行
 ```
 
 ---

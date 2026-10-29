@@ -1,1 +1,97 @@
 @import "tailwindcss";
+
+* {
+  box-sizing: border-box;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  min-height: 100dvh;
+  overflow-x: hidden;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  background-color: #FFFDF7;
+  color: #111827;
+  font-family: "Hiragino Maru Gothic ProN", "Rounded Mplus 1c", "BIZ UDPGothic", "Meiryo UI", "Meiryo", sans-serif;
+  line-height: 1.6;
+}
+
+#root {
+  width: 100%;
+  min-height: 100dvh;
+  margin: 0;
+  padding: 0;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Kid & Senior friendly tactile card / button utility styles */
+.tactile-card {
+  background-color: #FFFFFF;
+  border: 3px solid #111827;
+  border-radius: 1.25rem;
+  box-shadow: 0 5px 0 #111827;
+}
+
+.tactile-btn {
+  border: 3px solid #111827;
+  border-radius: 1rem;
+  box-shadow: 0 5px 0 #111827;
+  transition: transform 0.08s ease, box-shadow 0.08s ease, background-color 0.15s ease;
+}
+
+.tactile-btn:active:not(:disabled) {
+  transform: translateY(4px);
+  box-shadow: 0 1px 0 #111827;
+}
+
+.tactile-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* Ensure html5-qrcode scanner buttons and selects are big, high-contrast, and easy to tap on phones */
+#reader {
+  border: 3px solid #111827 !important;
+  border-radius: 1rem;
+  overflow: hidden;
+  background: #FFFFFF;
+}
+
+#reader button {
+  background-color: #1D4ED8 !important;
+  color: #FFFFFF !important;
+  font-weight: 900 !important;
+  font-size: 1rem !important;
+  padding: 0.75rem 1.25rem !important;
+  border: 3px solid #111827 !important;
+  border-radius: 0.75rem !important;
+  margin: 0.5rem auto !important;
+  cursor: pointer !important;
+  display: inline-block !important;
+}
+
+#reader select {
+  background-color: #FFFFFF !important;
+  color: #111827 !important;
+  font-weight: 700 !important;
+  padding: 0.5rem !important;
+  border: 2px solid #111827 !important;
+  border-radius: 0.5rem !important;
+  margin: 0.4rem 0 !important;
+  max-width: 100% !important;
+}
+
+#reader a {
+  color: #1D4ED8 !important;
+  font-weight: 700 !important;
+  text-decoration: underline !important;
+}
+
+/* Safe area bottom padding for mobile browser navigation bars */
+.pb-safe-screen {
+  padding-bottom: calc(6.5rem + env(safe-area-inset-bottom, 24px));
+}
